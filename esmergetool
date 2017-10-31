@@ -1,5 +1,6 @@
-#!/bin/env python
+#!/usr/bin/python
 # vim: set ts=4 sts=4 sw=4 et:
+# Src: https://github.com/irasnyd/esmergetool
 
 '''
 Merge several Elasticsearch indices into a single combined index
@@ -16,7 +17,14 @@ import datetime
 import platform
 import collections
 
-import elasticsearch
+try:
+    import elasticsearch2 as elasticsearch
+except ImportError:
+    print("INFO: 'elasticsearch2' not available. Trying legacy library...")
+    try:
+        import elasticsearch
+    except ImportError:
+        exit("FATAL: No 'elasticsearch' python library available.")
 
 DEFAULT_STATUS_INDEX = 'esmergetool-status'
 
@@ -41,9 +49,7 @@ def main():
     parser.add_argument('--set-source-readonly', help='Set source indices read-only as we finish with them', action='store_true')
     parser.add_argument('--set-destination-readonly', help='Set destination index read-only when complete', action='store_true')
     parser.add_argument('--status-index', default=DEFAULT_STATUS_INDEX, help='Override default status index (default: {})'.format(DEFAULT_STATUS_INDEX))
-
     args = parser.parse_args()
-    #print 'ARGS:', args
 
     mergetool = MergeTool(args)
     mergetool.confirm_with_user()
@@ -198,6 +204,8 @@ class MergeTool(object):
     def __init__(self, args):
         self.args = args
 
+        if self.args.host is None:
+            exit('FATAL: Host not specified. Use "-h" or "--help" for help screen.')
         hosts = self.args.host.split(',')
         hosts = [elem.strip() for elem in hosts]
         self.elasticsearch = elasticsearch.Elasticsearch(hosts=hosts)
@@ -221,7 +229,7 @@ class MergeTool(object):
         try:
             self.elasticsearch.indices.stats(index=name)
             return True
-        except elasticsearch.TransportError, ex:
+        except elasticsearch.TransportError as ex:
             if ex.error == 'index_closed_exception':
                 return False
 
@@ -345,7 +353,7 @@ class MergeTool(object):
 
     def create_and_configure_destination_index(self):
         '''Create the destination index and configure settings to increase reindex speed'''
-
+        # NOTE: VERIFY SETTINGS!
         # these settings provide roughly optimal indexing speed without
         # overriding too many defaults
         body = {
@@ -360,17 +368,17 @@ class MergeTool(object):
 
         # create the index if it doesn't exist
         if not self.index_exists(self.args.destination_index):
-            print 'Creating destination index:', self.args.destination_index
+            print('Creating destination index:', self.args.destination_index)
             response = self.elasticsearch.indices.create(index=self.args.destination_index, body=jsonify(body))
             if not self.response_is_success(response):
                 raise Exception("Unable to create index: {}".format(self.args.destination_index))
 
         # configure destination index in read-write mode
-        print 'Configuring destination index in read-write mode'
+        print('Configuring destination index in read-write mode')
         self.set_index_readwrite(self.args.destination_index)
 
         # and now configure the index for maximum indexing speed
-        print 'Configuring destination index for maximum indexing speed'
+        print('Configuring destination index for maximum indexing speed')
 
         # remove the compression setting (you can only set it during creation)
         del body['settings']['index']['codec']
@@ -386,6 +394,7 @@ class MergeTool(object):
         '''
         self.optimize_index(self.args.destination_index)
 
+        # NOTE: VERIFY SETTINGS!
         body = {
             "settings": {
                 "index": {
@@ -407,7 +416,7 @@ class MergeTool(object):
         '''
         # automatically close the previous source index if it was automatically opened
         if self.statusdocument.close_source_when_finished and self.statusdocument.current_source_index != '':
-            print 'Automatically re-closing source index:', self.statusdocument.current_source_index
+            print('Automatically re-closing source index:', self.statusdocument.current_source_index)
             response = self.elasticsearch.indices.close(index=self.statusdocument.current_source_index)
             if not self.response_is_success(response):
                 raise Exception('Automatic close of source index %s failed' % (self.statusdocument.current_source_index, ))
@@ -418,12 +427,12 @@ class MergeTool(object):
 
         # check to see if the reindex is complete
         if src == '':
-            print 'Reindex is already complete'
+            print('Reindex is already complete')
             return
 
         # automatically open closed indices
         if not self.index_is_open(src):
-            print 'Automatically open source index:', src
+            print('Automatically open source index:', src)
             self.statusdocument.close_source_when_finished = True
             response = self.elasticsearch.indices.open(index=src)
             if not self.response_is_success(response):
@@ -448,7 +457,7 @@ class MergeTool(object):
             "conflicts": "proceed",
         }
 
-        print 'Begin Background Reindex: src={} dst={}'.format(src, dst)
+        print('\nBegin Background Reindex: src={} dst={}'.format(src, dst))
 
         response = self.elasticsearch.reindex(body=jsonify(body), wait_for_completion=False)
 
@@ -460,7 +469,7 @@ class MergeTool(object):
         self.update_status_document()
 
         # update our user on progress
-        print 'Elasticsearch reindex task id:', self.statusdocument.current_reindex_taskid
+        print('Elasticsearch reindex task id:' + self.statusdocument.current_reindex_taskid)
 
     def get_reindex_task_status(self):
         '''
@@ -547,13 +556,13 @@ class MergeTool(object):
             except ZeroDivisionError:
                 pct = 0.0
 
-            print 'Reindex is running (source_index: %s, runtime: %.2f seconds, %d/%d => %.2f%% complete)' % (
+            print('Reindex is running (source_index: %s, runtime: %.2f seconds, %d/%d => %.2f%% complete)' % (
                 self.statusdocument.current_source_index,
                 taskstatus.runtime,
                 done,
                 total,
                 pct,
-            )
+            ))
 
             # update the status document and sleep before the next poll
             self.update_status_document()
@@ -579,19 +588,19 @@ class MergeTool(object):
                 if not self.is_entire_reindex_job_complete():
                     self.begin_next_reindex_in_background()
 
-            print 'Reindex job is complete, optimize and reconfigure destination index settings'
+            print('Reindex job is complete, optimize and reconfigure destination index settings')
             self.finalize_destination_index_settings()
 
             if self.args.set_destination_readonly:
                 self.set_index_readonly(self.statusdocument.destination_index)
 
             self.delete_status_document()
-        except KeyboardInterrupt, ex:
+        except KeyboardInterrupt as ex:
             self.statusdocument.status = 'KEYBOARDINTERRUPT'
             self.statusdocument.message = 'Interrupted by user'
             self.update_status_document()
             sys.exit(1)
-        except Exception, ex:
+        except Exception as ex:
             self.statusdocument.status = 'CRASHED'
             self.statusdocument.message = str(ex)
             self.update_status_document()
@@ -662,52 +671,52 @@ class MergeTool(object):
             warnings.append('Existing identical job message is: {}'.format(statusdocument.message))
 
         # print everything so that the user can read it and confirm
-        print 'YOU MUST CONFIRM THAT THIS INFORMATION IS CORRECT BEFORE PROCEEDING:'
-        print
-        print 'Source Indices:'
+        print('YOU MUST CONFIRM THAT THIS INFORMATION IS CORRECT BEFORE PROCEEDING:')
+        print("")
+        print('Source Indices:')
         for name in source_indices:
-            print '-', self.str_index_information(name)
-        print
-        print 'Destination Index:'
-        print '-', self.str_index_information(destination_index)
+            print(' - ' + self.str_index_information(name))
+        print("")
+        print('Destination Index:')
+        print(' - ' + self.str_index_information(destination_index))
         if len(additionalactions) > 0:
-            print
-            print 'Additional Actions:'
+            print("")
+            print('Additional Actions:')
             for elem in additionalactions:
-                print '-', elem
+                print(' - ' + elem)
         if len(warnings) > 0:
-            print
-            print 'Warnings:'
+            print("")
+            print('Warnings:')
             for elem in warnings:
-                print '-', elem
+                print(' - ' + elem)
 
         # previous job found and resume flag not given, abort
         if statusdocument and not self.args.resume:
-            print
-            print 'Previous job found, but --resume flag not present. Exiting now.'
+            print("")
+            print('Previous job found, but --resume flag not present. Exiting now.')
             sys.exit(1)
 
         # dry run, exit now
         if self.args.dry_run:
-            print
-            print 'Dry run requested, exiting now.'
+            print("")
+            print('Dry run requested, exiting now.')
             sys.exit(0)
 
         # user requested that we confirm settings with them interactively
         if self.args.yes:
-            print
-            print 'Confirmation automatically given by command line option'
+            print("")
+            print('Confirmation automatically given by command line option')
         else:
-            print
+            print("")
             response = raw_input('Please confirm by typing "y" now: ')
             response = response.lower().strip()
             if response != 'y':
-                print 'Confirmation not given, exiting now'
+                print('Confirmation not given, exiting now')
                 sys.exit(1)
-            print 'Confirmation given interactively by user'
+            print('Confirmation given interactively by user')
 
         # we need one more extra line to make the output look nice
-        print
+        print("")
 
         # confirmation received, we should create the status document for the job now
         if not statusdocument:
@@ -721,3 +730,4 @@ class MergeTool(object):
 
 if __name__ == '__main__':
     main()
+
